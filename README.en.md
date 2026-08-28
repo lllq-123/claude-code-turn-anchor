@@ -12,6 +12,30 @@ historical copies before they accumulate in context and consume tokens.
 > of an important session for the first trial. The current release is tested
 > with Claude Code 2.1.175.
 
+> [!IMPORTANT]
+> **2026-08 correction: this project only fits a "resume-per-turn" runtime.**
+> Earlier revisions of this README omitted a key precondition. Read
+> [Which runtime shape this fits](#which-runtime-shape-this-fits) before
+> installing:
+>
+> - Pruning only edits the transcript **on disk**. A running Claude Code
+>   process keeps its history **in memory and never re-reads the transcript**,
+>   so in a long-lived interactive session pruning removes nothing from what
+>   the model actually receives — the savings only materialize after the next
+>   resume;
+> - Worse, disk and memory now disagree. **On the next resume, the rebuilt
+>   prompt prefix diverges at the first blanked anchor, and the entire prompt
+>   cache is invalidated.** Anchors exist from turn one, so the divergence
+>   point sits at the very top of history (measured: 99.6–99.8% of context
+>   rewritten at cache-write rates, billed at 1.25×/2×).
+>
+> A "resume-per-turn" architecture — headless automation that starts a fresh
+> `claude -p --resume <session-id>` process for every turn — has neither
+> problem: disk is the single source of truth, pruning takes effect
+> immediately, and the cache loss is only a small tail slice (measured shared
+> prefix between adjacent turns ≈ 99.1%). **Do not enable this in a
+> long-lived interactive terminal session.**
+
 ## The problem
 
 In a long conversation, a few important signals can sink far back in context:
@@ -28,7 +52,7 @@ Claude Code also saves injected context in the session transcript and replays it
 when a session is resumed. If a hook only adds, a session with `N` turns can end
 up carrying `N` copies of the same anchor.
 
-This project keeps one fresh copy:
+This project keeps one fresh copy **in the on-disk transcript**:
 
 ```text
 user submits a prompt
@@ -37,13 +61,44 @@ user submits a prompt
 one UserPromptSubmit hook
         │
         ├─ old <TURN_ANCHOR> attachment content → []
-        │    (uuid / parentUuid stay intact)
+        │    (uuid / parentUuid stay intact; disk only)
         │
         └─ return one fresh anchor as additionalContext
                     │
                     ▼
-          Claude sees the current anchor
+   the on-disk transcript holds one live anchor
 ```
+
+**When the model actually "sees only one" depends on your runtime shape** —
+the precondition earlier revisions failed to state, later established with
+real API usage data. See the next section.
+
+## Which runtime shape this fits
+
+Claude Code runs in two typical shapes, and this project behaves very
+differently in each:
+
+| | Resume-per-turn (fits ✅) | Long-lived process (does not fit ❌) |
+|---|---|---|
+| Typical setup | headless automation: a fresh `claude -p --resume <sid>` process per turn | interactive terminal; long-lived `--input-format stream-json` process |
+| Where history comes from | rebuilt from the JSONL on disk every turn | process memory, append-only, never re-read from disk |
+| When pruning takes effect | **immediately** — the next turn rebuilds from the pruned disk | **never within the session** — the model keeps receiving every historical anchor |
+| Token savings | real (formula below) | zero while the process lives |
+| Prompt-cache cost | small tail slice only: pruning touches the previous turn's anchor; measured shared prefix ≈ 99.1% | **full cache loss on next resume**: divergence at the top of history; measured 99.6–99.8% rewritten |
+
+Mechanism: a running Claude Code process keeps conversation history in memory
+and always builds requests from that copy; the transcript JSONL is an
+append-only record, read only when a session is resumed or rebuilt. Rewriting
+the disk changes nothing about what the live process sends — but it silently
+changes what the *next resume* will read. The two copies now disagree, and on
+resume the prompt prefix mismatches from the first blanked anchor onward, so
+the cache backend recomputes everything.
+
+A verification trap worth naming: **counting anchors in the JSONL proves
+nothing about what the model sees.** "One live anchor on disk" looks great
+while the live process still ships all `N` copies in every request. To verify
+real effect, look at API usage (`input_tokens` / `cache_read_input_tokens`)
+or Claude Code's `/context` — not at the file.
 
 ## Why one combined hook
 
@@ -63,7 +118,9 @@ appears in normal user or assistant text.
 
 ## Token shape
 
-For an anchor of roughly `A` tokens:
+**The formula below only holds in a resume-per-turn runtime** (in a
+long-lived process nothing is saved while it runs; see above). For an anchor
+of roughly `A` tokens:
 
 - add-only injection can approach `N × A` anchor tokens near turn `N`;
 - this project stays near `A`, with one live copy;
@@ -72,6 +129,14 @@ For an anchor of roughly `A` tokens:
 
 Prompt caching, compaction, and Claude Code versions affect actual billing.
 This estimate describes context volume, not a guaranteed invoice reduction.
+
+The cost of enabling it in a long-lived process is just as real: in one
+measured incident, a long session resumed with its early anchors blanked and
+`cache_read` fell from the usual two-hundred-thousand-plus tokens to 15,493
+(only the system + tools segments still hit), with the rest recomputed at
+cache-write rates. After disabling pruning, the same scenario resumed with
+the cache fully inherited (`cache_read` 72,197 = the previous turn's
+67,906 + 4,291, zero collapse).
 
 ## Requirements
 
@@ -209,11 +274,23 @@ custom anchor preservation across reinstall.
 
 ## Known limitations
 
+- **Resume-per-turn runtimes only** (see "Which runtime shape this fits"):
+  in a long-lived process pruning never takes effect, and it invalidates the
+  entire prompt cache on the next resume.
 - This is a careful rewrite of Claude Code's internal transcript structure, not
   an official “remove injected context” API. Re-run tests and start with a
   non-critical session after Claude Code upgrades.
 - Current Claude Code skips hook attachments whose `content` is `[]` when it
   rebuilds context. An internal format change may require an update here.
+- There is no official ephemeral (one-shot) injection option today; the
+  feature request is
+  [claude-code#40216](https://github.com/anthropics/claude-code/issues/40216).
+  Also note that **`SessionStart` hook `additionalContext` is not written to
+  the transcript**
+  ([#11906](https://github.com/anthropics/claude-code/issues/11906)) — if your
+  injected content never changes within a session, plain `SessionStart`
+  injection needs none of this. This project only serves injections whose
+  content changes every turn.
 - The hook scans the transcript on every prompt and rewrites the same inode when
   an old anchor is found. Very large sessions add disk I/O.
 - Rotating backups can use up to roughly three transcript copies per session.

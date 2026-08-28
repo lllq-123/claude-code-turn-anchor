@@ -9,6 +9,24 @@
 > JSONL；该格式不是稳定的公开 API。请先跑测试和 `--dry-run`，不要拿唯一一份
 > 重要会话做第一次实验。当前版本在 Claude Code 2.1.175 上验证。
 
+> [!IMPORTANT]
+> **2026-08 重要修正：本方案只适合「每轮 resume」的运行架构。**
+> 早期版本的这份 README 没有写清一个关键前提，先读
+> [适用架构](#适用架构先确认你的运行方式) 再决定装不装：
+>
+> - 清理动作只改**磁盘上的** transcript；**运行中的 Claude Code 进程把历史
+>   放在内存里，从不回头重读磁盘**。所以在常驻交互式会话里，清理不会减少
+>   任何发给模型的内容——省 token 的效果要等到下一次 resume 才兑现；
+> - 更重要的是，磁盘和内存从此不一致：**下一次 resume 从磁盘重建历史时，
+>   prompt 前缀从第一条被清空的锚点起全部失配，整份 prompt cache 报废**。
+>   锚点从第一轮就存在，所以失配点几乎在历史最开头（实测 resume 后
+>   99.6–99.8% 的上下文被迫全量重写，按缓存写入 1.25×/2× 计费）。
+>
+> 在「每轮都是 `claude -p --resume <session-id>` 起新进程」的 headless /
+> 自动化架构下没有这个问题：磁盘就是唯一真相，清理立即生效，缓存损耗只有
+> 尾部一小段（实测相邻两轮共同前缀约 99.1%）。**常驻交互式终端会话请不要
+> 启用本项目。**
+
 ## 它解决什么问题
 
 长对话里，一些本来很重要、但只写在很前面的信号会逐渐沉底，例如：
@@ -25,7 +43,7 @@ Claude Code 的 `UserPromptSubmit` hook 可以在每次用户发送消息时返�
 但官方文档也说明：注入的内容会保存进 session transcript，恢复会话时会重新
 播放。若每轮只加不清，聊了 `N` 轮以后，历史里就可能躺着 `N` 份相同锚点。
 
-本项目只保留当前轮需要的一份：
+本项目只在**磁盘 transcript** 里保留当前轮需要的一份：
 
 ```text
 用户发送 prompt
@@ -34,16 +52,39 @@ Claude Code 的 `UserPromptSubmit` hook 可以在每次用户发送消息时返�
 同一个 UserPromptSubmit hook
       │
       ├─ 旧 <TURN_ANCHOR> attachment 的 content → []
-      │    （保留 uuid / parentUuid）
+      │    （保留 uuid / parentUuid，只改磁盘）
       │
       └─ 返回一份新 anchor 作为 additionalContext
                │
                ▼
-        Claude 本轮只看到新锚点
+   磁盘 transcript 里只剩最新一份锚点
 ```
 
-下一轮再重复这个过程，所以它像一张真正的“阅后即焚”便签：信号每轮都在
-最近处，但历史副本不会越来越厚。
+**模型什么时候才真的"只看到一份"，取决于你的运行架构**——这是本项目
+早期文档没写清、后来用真实 API 账单实测补上的关键前提，见下一节。
+
+## 适用架构：先确认你的运行方式
+
+Claude Code 有两种典型的运行形态，本项目在两边的行为完全不同：
+
+| | 每轮 resume（适用 ✅） | 常驻进程（不适用 ❌） |
+|---|---|---|
+| 典型场景 | headless 自动化：每轮 `claude -p --resume <sid>` 起新进程，答完即退 | 交互式终端会话；`--input-format stream-json` 长驻进程 |
+| 历史从哪来 | 每轮从磁盘 JSONL 重建 | 进程内存，只增不改，从不重读磁盘 |
+| 清理何时生效 | **立即**——下一轮重建就用清理后的磁盘 | **本会话内永不生效**——模型每轮照样收到全部历史锚点 |
+| 省 token | 真省（见下节公式） | 活进程期间 0 |
+| prompt cache 代价 | 只烧尾部一小段：清理只动上一轮的锚点，实测相邻两轮共同前缀 ≈ 99.1% | **下次 resume 时整份报废**：失配点在历史最开头，实测 99.6–99.8% 全量重写 |
+
+机制解释：运行中的 Claude Code 进程把对话历史保存在内存里，发请求永远用
+内存那份；transcript JSONL 是**只往后追加的落盘记录**，只有 resume /
+重启重建上下文时才会被读。改写磁盘对活进程发出的请求没有任何影响——
+但它悄悄改掉了「下次 resume 会读到的历史」。两份从此不一致，resume 一读，
+prompt 前缀从第一条被清空的锚点起对不上，缓存服务端只能全量重算。
+
+一个容易踩的验证陷阱：**数磁盘文件里的锚点数量，证明不了模型看到了什么。**
+磁盘上"有内容的锚点=1"很好看，但活进程发出去的请求里可能还带着全部 N 份。
+想验证真实效果，看 API 返回的 usage（`input_tokens` / `cache_read_input_tokens`）
+或 Claude Code 的 `/context`，别看文件。
 
 ## 为什么合并成一个 hook
 
@@ -62,7 +103,8 @@ Anthropic 的 hook 指南说明，同一事件下匹配的 hooks 会并行运行
 
 ## 能省多少 token
 
-假设锚点长度约为 `A` tokens：
+**以下公式只在「每轮 resume」架构下成立**（常驻进程里活进程期间省不到，
+见上节）。假设锚点长度约为 `A` tokens：
 
 - 只注入不清理：第 `N` 轮附近可能带着约 `N × A` tokens 的历史锚点；
 - 本项目：稳定在约 `A` tokens，只留当前一份；
@@ -71,6 +113,12 @@ Anthropic 的 hook 指南说明，同一事件下匹配的 hooks 会并行运行
 
 实际账单还会受 prompt caching、compaction 和 Claude Code 版本影响，这个
 公式只描述上下文体积，不等于最终计费数字。
+
+反过来，如果在常驻进程里启用，代价是实打实的：某次真实事故里，一个长会话
+在 resume 时因为历史开头的锚点被清空过，`cache_read` 从正常的二十多万 token
+跌到 15,493（只剩 system + tools 段命中），十几万 token 按缓存写入价全量
+重算；关闭清理后同场景实测 resume 完整继承缓存（`cache_read` 72,197 =
+上一轮 67,906 + 4,291，零崩塌）。
 
 ## 系统要求
 
@@ -216,11 +264,19 @@ python3 -m py_compile src/turn_anchor.py install.py uninstall.py
 
 ## 已知限制
 
+- **只适用于每轮 resume 架构**（见「适用架构」节）：常驻进程内清理不生效，
+  且会在下一次 resume 时打掉整份 prompt cache。
 - 这是对 Claude Code 内部 transcript 结构的谨慎改写，不是官方提供的
   “删除已注入上下文”API；Claude Code 升级后应重新跑测试并先用非重要会话
   验证。
 - 当前 Claude Code 在重建上下文时会跳过 `content=[]` 的 hook attachment；
   若以后内部格式改变，本项目也需要跟着更新。
+- 官方目前没有 ephemeral（一次性）注入选项，相关请求挂在
+  [claude-code#40216](https://github.com/anthropics/claude-code/issues/40216)。
+  另一个方向：**`SessionStart` hook 的 `additionalContext` 不会写进
+  transcript**（[#11906](https://github.com/anthropics/claude-code/issues/11906)）——
+  如果你的注入内容整个会话都不变，直接用 `SessionStart` 注入即可，
+  不需要本项目；本项目只服务「每轮内容会变」的注入。
 - 每轮需要扫描 transcript，并在命中旧锚点时原 inode 重写文件；超大的长会话
   会产生额外磁盘 I/O。
 - 轮转备份最多占用约 3 份 transcript 的空间，长会话请关注磁盘余量。
