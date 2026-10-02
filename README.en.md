@@ -149,6 +149,15 @@ present in the hook payload.
 - An anchor is an alignment signal, not an enforcement or security boundary.
 - Anchors and counters stay local; the hook makes no network requests.
 
+## Related: per-turn temporary reminders
+
+This project appends periodically; recorded anchors remain in normal history. If you need reminders that can change every turn without entering subsequent model context, see:
+
+- [Claude Code ephemeral reminders](https://github.com/lllq-123/claude-code-ephemeral-reminders): request-clone injection research requiring version-specific binary changes.
+- [Codex ephemeral context](https://github.com/lllq-123/codex-ephemeral-context): a Codex app-server source patch set providing a request-only developer tail.
+
+These require separate deployment; installing this hook does not enable them. Ephemeral describes context lifetime, not secure deletion of logs or provider data.
+
 ## License
 
 MIT

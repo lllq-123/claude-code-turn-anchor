@@ -143,6 +143,15 @@ python3 -m py_compile src/turn_anchor.py install.py uninstall.py
 - anchor 是对齐信号，不是安全边界或强制规则。
 - 所有 anchor 与计数状态都留在本机；脚本不联网。
 
+## 相关：每轮临时提醒
+
+本项目采用周期性追加，已经写入的 anchor 随正常历史保留。若需要内容每轮更新、且不进入后续模型上下文的提醒，参见：
+
+- [Claude Code ephemeral reminders](https://github.com/lllq-123/claude-code-ephemeral-reminders)：Claude Code 的请求副本注入研究，需要对应版本的 binary 改动。
+- [Codex ephemeral context](https://github.com/lllq-123/codex-ephemeral-context)：Codex app-server 的源码补丁，提供当轮 request-only developer tail。
+
+它们是需要单独部署的方案，不是安装本 hook 后自动启用的模式。“临时”描述上下文生命周期，不是日志或服务端安全擦除。
+
 ## License
 
 MIT
