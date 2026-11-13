@@ -41,15 +41,25 @@ transcript 的 session 计数器控制频率：
 
 ## 哪些历史操作安全
 
-- ✅ **整轮尾部撤回 / rewind**：把受影响的 user、attachment、thinking、assistant 和更晚
-  轮次一起截掉，回到曾经存在过的旧前缀；旧 cache entry 仍可复用。
+- ✅ **整轮尾部撤回 / rewind**：从真实 user 轮次组首，把该组、attachment、thinking、
+  assistant 和更晚轮次一起截掉，回到曾经存在过的旧前缀。普通输入、心跳、工具返回
+  都是 user；连续真实 user 算一组，跨元数据 / replay 也不能只截后半。旧 cache entry
+  有机会复用，但 TTL、缓存断点及 resume 请求重建仍影响命中，不能保证。
+  真实 user 上的 `isMeta=true` 仍计作 user；元数据记录指 system / attachment 等顶层类型。
 - ⚠️ **只改当前最后一条 assistant 的可见尾巴**：后面还没有新 thinking 时，只从改点
   产生尾部分叉。
 - ❌ **改历史中段并保留后续 thinking**：后续 thinking 绑定在旧前缀上，不兼容 Fable 5.1。
 - ❌ **清空旧 hook attachment 再 resume**：这正是旧版已经删除的危险形状。
 
+整组工具返回也可作为撤回起点，即使保留前缀含对应 `tool_use`：某些 Claude Code
+版本会补“中断 / 结果未知”的返回，但不保证所有版本行为相同。删记录不会撤销
+已经执行的工具动作，重试前先核实结果。assistant / thinking / attachment / 请求快照
+内部的 `role=user` 不算真实入口。手工修复可用 [JSONL 小剪刀](https://github.com/lllq-123/claude-output-guard#用-jsonl-小剪刀修复)
+先预览；默认剪尾会删除剪口后的全部内容，不保留后续 thinking。
+
 官方说明：
 
+- [Preserved thinking prefix checks](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking/prefix-checks)
 - [Prompting Claude Fable 5.1 — Keep the conversation history append-only](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-1)
 - [Claude Code prompt caching](https://code.claude.com/docs/en/prompt-caching)
 

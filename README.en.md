@@ -46,17 +46,31 @@ the current window and limiting context growth.
 
 ## Safe and unsafe history operations
 
-- ✅ **Whole-tail rewind:** remove the affected user, attachments, thinking,
-  assistant, and every later turn together. This returns to a prefix that
-  existed before, so its old cache entry can still be reused.
+- ✅ **Whole-tail rewind:** start at a real user group start and remove that
+  group, attachments, thinking, assistant, and every later turn together.
+  Ordinary prompts, heartbeats, and tool results all count as user messages.
+  Consecutive real user records form one group even across metadata / replay
+  rows. This restores an old prefix with possible cache reuse; TTL, cache
+  breakpoints, and resume request reconstruction still affect hits.
+  A real user with `isMeta=true` still counts; metadata records mean top-level
+  types such as system / attachment.
 - ⚠️ **Edit only the visible tail of the latest assistant message:** if no later
   thinking exists, only that tail branches.
 - ❌ **Edit a middle message while replaying later thinking:** later blocks are
   bound to the old prefix and are incompatible with Fable 5.1.
 - ❌ **Blank old hook attachments and resume:** this is the retired design.
 
+A whole tool-result group may also begin a rewind, even with its `tool_use` in
+the retained prefix. Some Claude Code versions add interrupted / outcome-unknown
+results on resume; this behavior is not guaranteed across versions. Deleting
+records does not undo tool actions; check their actual outcome before retrying.
+A `role=user` nested in assistant, thinking, attachment, or request-snapshot data
+is not a real boundary. For manual repair, preview with the [JSONL scissors](https://github.com/lllq-123/claude-output-guard#用-jsonl-小剪刀修复).
+Its default tail trim removes everything after the cut, including later thinking.
+
 Official references:
 
+- [Preserved thinking prefix checks](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking/prefix-checks)
 - [Prompting Claude Fable 5.1 — Keep the conversation history append-only](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-1)
 - [Claude Code prompt caching](https://code.claude.com/docs/en/prompt-caching)
 
